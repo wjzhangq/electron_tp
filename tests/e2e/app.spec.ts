@@ -235,7 +235,7 @@ test.describe('app', () => {
 
   test('API runs in a separate utility process and is restarted after a crash', async () => {
     const pid = await app.evaluate(
-      ({ app }) => app.getAppMetrics().find((m) => m.type === 'Utility' && m.serviceName === 'API Service')?.pid,
+      ({ app }) => app.getAppMetrics().find((m) => m.type === 'Utility' && m.name === 'API Service')?.pid,
     );
     expect(pid).toBeGreaterThan(0);
     expect(pid).not.toBe(await app.evaluate(() => process.pid));
@@ -245,7 +245,7 @@ test.describe('app', () => {
       .poll(async () => page.evaluate(async () => (await fetch('/api/ping')).status), { timeout: 15_000 })
       .toBe(200);
     const newPid = await app.evaluate(
-      ({ app }) => app.getAppMetrics().find((m) => m.type === 'Utility' && m.serviceName === 'API Service')?.pid,
+      ({ app }) => app.getAppMetrics().find((m) => m.type === 'Utility' && m.name === 'API Service')?.pid,
     );
     expect(newPid).toBeGreaterThan(0);
     expect(newPid).not.toBe(pid);
@@ -266,7 +266,7 @@ test.describe('app', () => {
     await expect
       .poll(() => app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)!.isMinimized(), secondId))
       .toBe(true);
-    expect(await win((w) => w.isMinimized())).toBe(false);
+    expect(await (await app.browserWindow(page)).evaluate((w) => w.isMinimized())).toBe(false);
     await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)!.destroy(), secondId);
   });
 
