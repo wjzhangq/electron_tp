@@ -1,5 +1,7 @@
 # My App —— Windows 桌面壳（Electron + TypeScript + chttp 虚拟 HTTP 服务）
 
+[![CI](https://github.com/wjzhangq/electron_tp/actions/workflows/ci.yml/badge.svg?branch=claude/eloquent-fermat-tw888z)](https://github.com/wjzhangq/electron_tp/actions/workflows/ci.yml)
+
 只运行在 **Windows x64** 的 Electron 桌面壳：前端页面与后端接口都通过自定义协议 `chttp://localhost` 提供，主进程充当“虚拟 HTTP Server”（**不监听任何端口**），支持 JSON 接口与 SSE 流式接口，业务能力可以内置路由或插件的形式扩展。
 
 ## 版本
@@ -38,7 +40,7 @@ tests/e2e/                 Playwright（Electron 模式）E2E
 
 ## 开发
 
-前提：Windows 10/11 x64，Node.js 22 LTS 或更高，Git。
+前提：Windows 10/11 x64，Node.js 22 LTS 或更高（推荐 24，与 CI 及 Electron 内置的 Node 主版本一致），Git。
 
 ```bash
 npm ci
@@ -71,6 +73,20 @@ npm run make         # out/make/inno/x64/My App_x64_<version>_setup.exe
 - `make` 需要 Inno Setup 6，默认路径 `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`，可用环境变量 `ISCC_PATH` 覆盖。
 - 安装包按用户安装（`PrivilegesRequired=lowest`），默认目录 `%LOCALAPPDATA%\Programs\My App`；卸载时删除安装目录和 `%APPDATA%\My App`。
 - 代码签名：设置 `WIN_SIGN_BACKEND` 时启用（exe/dll 经 Forge `windowsSign.hookModulePath`，安装/卸载程序经 Inno `SignTool` → `scripts/sign-cli.cjs`），统一实现在 `scripts/sign-hook.cjs`。签名后端待定，目前产出未签名安装包。
+
+## 持续集成
+
+`.github/workflows/ci.yml` 在每次 push 和 pull request 时运行于 GitHub Actions `windows-latest`：
+
+| 项 | 配置 |
+|----|------|
+| Node.js | 24（`actions/setup-node@v7`，启用 npm 缓存） |
+| Actions | `actions/checkout@v7`、`actions/setup-node@v7`、`actions/upload-artifact@v7`（均为 Node 24 运行时） |
+| Inno Setup | runner 上没有 `ISCC.exe` 时执行 `choco install innosetup -y` |
+| 步骤 | `npm ci` → `npm audit --omit=dev --audit-level=high` → lint → typecheck → test → make → test:e2e → check:tamper |
+| 构件 | `installer`：`out/make/inno/x64/*.exe`；失败时额外上传 `playwright-report`（`test-results/`、`playwright-report/`） |
+
+安装包可在对应 Actions 运行页面的 Artifacts 中下载（未签名）。
 
 ## 新增插件
 
@@ -148,7 +164,7 @@ export function registerExampleRoutes(router: Router): void {
 
 ## 实施记录
 
-> 环境说明：代码在 Linux 容器中开发，并在 Linux 上以非 root 用户 + Xvfb + openbox 跑过 E2E 作为替身验证。全部自动检查（含 `make`、`test:e2e`、`check:tamper`）已在 GitHub Actions `windows-latest` 上实际执行并通过：[CI run #3](https://github.com/wjzhangq/electron_tp/actions/runs/39100445055)（提交 `ccf6782`）。
+> 环境说明：代码在 Linux 容器中开发，并在 Linux 上以非 root 用户 + Xvfb + openbox 跑过 E2E 作为替身验证。全部自动检查（含 `make`、`test:e2e`、`check:tamper`）已在 GitHub Actions `windows-latest` 上实际执行并通过：[CI run #5](https://github.com/wjzhangq/electron_tp/actions/runs/39100754341)（提交 `23d7a66`，Node 24 + actions v7）。
 
 ### 与文档的差异（需确认）
 
@@ -215,9 +231,9 @@ export function registerExampleRoutes(router: Router): void {
 | 基础检查 | ✅ 通过 |
 | `npm audit --omit=dev --audit-level=high` | ✅ 通过（0 vulnerabilities） |
 | `npm run package` | ✅ 通过（Linux 交叉打包 win32/x64；Fuses 读回与 SEC-6 一致；`app.asar` 内含 `.vite/` 与 `plugins/hello/index.js`） |
-| `npm run test:e2e` | ✅ Windows（[CI run #3](https://github.com/wjzhangq/electron_tp/actions/runs/39100445055)）14/14 通过；Linux 替身环境同样 14/14 |
-| `npm run make` | ✅ Windows 通过（[CI run #3](https://github.com/wjzhangq/electron_tp/actions/runs/39100445055)），产出 `My App_x64_1.0.0_setup.exe`，作为 CI 构件 `installer` 上传（zip 约 109 MiB）。在 Linux 上执行时按 FR-BLD-5 明确报错 |
-| `npm run check:tamper` | ✅ Windows 通过（[CI run #3](https://github.com/wjzhangq/electron_tp/actions/runs/39100445055)）：篡改 `app.asar` 中 `main.cjs` 的一个字节后应用约 2 秒内以退出码 1 退出；未篡改版 5 秒后仍在运行 |
+| `npm run test:e2e` | ✅ Windows（[CI run #5](https://github.com/wjzhangq/electron_tp/actions/runs/39100754341)）14/14 通过；Linux 替身环境同样 14/14 |
+| `npm run make` | ✅ Windows 通过（[CI run #5](https://github.com/wjzhangq/electron_tp/actions/runs/39100754341)），产出 `My App_x64_1.0.0_setup.exe`，作为 CI 构件 `installer` 上传（zip 约 109 MiB）。在 Linux 上执行时按 FR-BLD-5 明确报错 |
+| `npm run check:tamper` | ✅ Windows 通过（[CI run #5](https://github.com/wjzhangq/electron_tp/actions/runs/39100754341)）：篡改 `app.asar` 中 `main.cjs` 的一个字节后应用约 2 秒内以退出码 1 退出；未篡改版 5 秒后仍在运行 |
 | 待人工验收 | 见下方清单 |
 
 **M4 人工验收清单**（状态均为“待人工验收”）：
