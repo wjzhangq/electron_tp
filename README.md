@@ -148,7 +148,7 @@ export function registerExampleRoutes(router: Router): void {
 
 ## 实施记录
 
-> 环境说明：本次实施在 **Linux 容器**（无 Windows、无 Inno Setup）中完成。所有自动检查都在该环境中实际执行；只能在 Windows 上运行的步骤（`make`、`check:tamper`、在 Windows 上跑 E2E）未能执行，记为“未执行（环境）”，需在 Windows / CI（`windows-latest`）上完成。E2E 在 Linux 上以非 root 用户 + Xvfb + openbox 运行，仅作为 Windows E2E 的替身验证。
+> 环境说明：代码在 Linux 容器中开发，并在 Linux 上以非 root 用户 + Xvfb + openbox 跑过 E2E 作为替身验证。全部自动检查（含 `make`、`test:e2e`、`check:tamper`）已在 GitHub Actions `windows-latest` 上实际执行并通过：[CI run #3](https://github.com/wjzhangq/electron_tp/actions/runs/39100445055)（提交 `ccf6782`）。
 
 ### 与文档的差异（需确认）
 
@@ -191,9 +191,9 @@ export function registerExampleRoutes(router: Router): void {
 | 未通过 | 无 |
 | 待人工验收 | Windows 上开发模式 HMR 与开发 CSP（Linux 下已通过 CDP 验证：页面 origin 为 `chttp://localhost`，CSP 的 `connect-src` 为 `'self' ws://localhost:5173`，修改 CSS 后无需刷新即生效） |
 
-**技术验证项结论**（Linux 实测，E2E 中保留了对应用例，Windows CI 会再次验证）：
+**技术验证项结论**（Linux 实测，并由 Windows CI 的 E2E 用例再次验证通过）：
 
-1. **渲染进程中止 `fetch` 时，`protocol.handle` 返回的 `ReadableStream` 会触发 `cancel`。** 用例 `M2 verification 1`（独立 session 中注册探针处理函数，记录 `cancel` 调用）通过，因此 FR-SSE-5 采用流的 `cancel` 回调，无需“写入失败 + 心跳检测”的备用方案。
+1. **（Linux 与 Windows CI 均通过）渲染进程中止 `fetch` 时，`protocol.handle` 返回的 `ReadableStream` 会触发 `cancel`。** 用例 `M2 verification 1`（独立 session 中注册探针处理函数，记录 `cancel` 调用）通过，因此 FR-SSE-5 采用流的 `cancel` 回调，无需“写入失败 + 心跳检测”的备用方案。
 2. **原生 `EventSource` 可以连接 `chttp://localhost/api/...`。** 用例 `M2 verification 2` 收到了 `progress` ×2 与 `complete` 事件。前端仍统一使用 `stream()` 客户端。
 3. **`npm run package` 后可以在项目根目录用 `electron .` 启动未打包构建并正常加载页面。** `package` 在根目录生成 `.vite/build/main.cjs`、`.vite/build/preload.cjs`、`.vite/renderer/main_window/`，E2E 以 `electron .` 启动成功，`app.isPackaged === false`，静态资源走生产分支。
 
@@ -215,9 +215,9 @@ export function registerExampleRoutes(router: Router): void {
 | 基础检查 | ✅ 通过 |
 | `npm audit --omit=dev --audit-level=high` | ✅ 通过（0 vulnerabilities） |
 | `npm run package` | ✅ 通过（Linux 交叉打包 win32/x64；Fuses 读回与 SEC-6 一致；`app.asar` 内含 `.vite/` 与 `plugins/hello/index.js`） |
-| `npm run test:e2e` | ✅ 14/14 通过（**Linux 替身环境**；Windows 上待 CI 验证） |
-| `npm run make` | ⛔ 未执行（环境）：需要 Windows + Inno Setup 6。在 Linux 上执行时按 FR-BLD-5 明确报错 |
-| `npm run check:tamper` | ⛔ 未执行（环境）：需要在 Windows 上启动 exe。脚本中定位 `app.asar` 内 `main.cjs` 偏移的逻辑已对实际打包产物验证 |
+| `npm run test:e2e` | ✅ Windows（[CI run #3](https://github.com/wjzhangq/electron_tp/actions/runs/39100445055)）14/14 通过；Linux 替身环境同样 14/14 |
+| `npm run make` | ✅ Windows 通过（[CI run #3](https://github.com/wjzhangq/electron_tp/actions/runs/39100445055)），产出 `My App_x64_1.0.0_setup.exe`，作为 CI 构件 `installer` 上传（zip 约 109 MiB）。在 Linux 上执行时按 FR-BLD-5 明确报错 |
+| `npm run check:tamper` | ✅ Windows 通过（[CI run #3](https://github.com/wjzhangq/electron_tp/actions/runs/39100445055)）：篡改 `app.asar` 中 `main.cjs` 的一个字节后应用约 2 秒内以退出码 1 退出；未篡改版 5 秒后仍在运行 |
 | 待人工验收 | 见下方清单 |
 
 **M4 人工验收清单**（状态均为“待人工验收”）：
@@ -226,15 +226,15 @@ export function registerExampleRoutes(router: Router): void {
 2. 覆盖升级：应用运行时修改 `package.json` 版本号重新 `make` 并安装，确认安装程序先关闭正在运行的应用，覆盖安装成功，“应用和功能”中只有一项。
 3. 卸载：卸载后确认安装目录与 `%APPDATA%\My App`（缓存、日志、崩溃转储）均被删除。
 4. SEC 清单逐项核对：SEC-1（DevTools 中 `typeof require === 'undefined'`）、SEC-2（不注入 CORS 头）、SEC-3（页面请求摄像头/通知被拒绝）、SEC-4（导航到外部地址被阻止，`window.open` 的 http 链接在系统浏览器打开，`<webview>` 无法挂载）、SEC-5（打包后响应头 CSP）、SEC-6（`npx @electron/fuses read --app <exe>`）、SEC-7（CI audit）、SEC-8（开发模式 CSP）。
-5. PERF 实测并记录：PERF-1 冷启动到窗口显示 ≤ 2 秒（先确定基准机器）；PERF-2 `GET /api/ping` P95 ≤ 5 ms；PERF-3 单条 SSE 每秒 10 条连续 10 分钟，主进程内存无持续增长；PERF-4 安装包 ≤ 120 MB。
+5. PERF 实测并记录：PERF-1 冷启动到窗口显示 ≤ 2 秒（先确定基准机器）；PERF-2 `GET /api/ping` P95 ≤ 5 ms；PERF-3 单条 SSE 每秒 10 条连续 10 分钟，主进程内存无持续增长；PERF-4 安装包 ≤ 120 MB（CI 构件 zip 约 109 MiB，需以安装包 exe 实际大小为准，余量不大）。
    - 参考数据（Linux 容器 + Xvfb，**不是基准机器**）：`electron .` 启动到窗口可见约 0.3 s；`/api/ping` 500 次往返 P50 1.8 ms、P95 2.8 ms。
 
 ### 需求与测试对应关系
 
 | 需求 | 测试或验收方式 | 状态 |
 |------|----------------|------|
-| FR-BLD | CI 流水线（`.github/workflows/ci.yml`） | lint/typecheck/test/package 本地通过；make 待 Windows |
-| FR-PRT-2/3、FR-RTE-10 协议层部分 | E2E `rejects other hosts (404) and cross-origin requests (403)` | 通过（Linux 替身） |
+| FR-BLD | CI 流水线（`.github/workflows/ci.yml`） | 通过（Windows CI） |
+| FR-PRT-2/3、FR-RTE-10 协议层部分 | E2E `rejects other hosts (404) and cross-origin requests (403)` | 通过（Windows CI） |
 | FR-PRT-5~8 | `static.test.ts` | 通过 |
 | FR-PRT-9 | `static.test.ts`（开发分支）+ 人工 | 单测通过；HMR 待 Windows 人工验收 |
 | FR-RTE | `router.test.ts` | 通过 |
@@ -243,8 +243,8 @@ export function registerExampleRoutes(router: Router): void {
 | FR-TSK | `auto-import.test.ts` | 通过 |
 | FR-LOG-2/3 | `logger.test.ts` | 通过 |
 | FR-LOG-5/6 | 人工验收（`logger.test.ts` 另覆盖了转储清理） | 待人工验收 |
-| FR-WIN、FR-IPC | E2E（最小化/最大化、关闭流程、刷新重置、openExternal 协议限制、导航/弹窗限制）+ 人工 | E2E 通过（Linux 替身）；其余待人工验收 |
-| SEC | `check:tamper` + M4 人工核对 | 待 Windows |
+| FR-WIN、FR-IPC | E2E（最小化/最大化、关闭流程、刷新重置、openExternal 协议限制、导航/弹窗限制）+ 人工 | E2E 通过（Windows CI）；其余待人工验收 |
+| SEC | `check:tamper` + M4 人工核对 | `check:tamper` 通过（Windows CI）；人工核对待验收 |
 | PERF | M4 人工实测 | 待人工验收 |
 
 ### 待定事项
