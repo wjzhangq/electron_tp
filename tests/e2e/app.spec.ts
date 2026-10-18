@@ -41,10 +41,10 @@ test.describe('app', () => {
     expect(await page.evaluate(() => typeof (window.app as unknown as { send?: unknown }).send)).toBe('undefined');
     expect(await page.evaluate(() => Object.keys(window.app).sort())).toEqual([
       'info',
-      'onAutoImport',
       'onThemeChanged',
       'openExternal',
       'openLogs',
+      'timers',
       'toggleDevTools',
       'window',
     ]);
@@ -61,15 +61,25 @@ test.describe('app', () => {
     expect(html.csp).toContain("connect-src 'self';");
     expect(html.cache).toBe('no-cache');
 
-    const pong = await page.evaluate(async () => (await fetch('/api/ping')).json());
-    expect(pong).toMatchObject({ code: 0, msg: 'success', data: { pong: true } });
-    expect(typeof pong.data.time).toBe('number');
+    const pong = await page.evaluate(async () => {
+      const res = await fetch('/api/ping');
+      return { ok: res.ok, status: res.status, body: await res.json() };
+    });
+    expect(pong).toMatchObject({ ok: true, status: 200, body: { pong: true } });
+    expect(typeof pong.body.time).toBe('number');
 
     const plugins = await page.evaluate(async () => (await fetch('/api/plugins')).json());
-    expect(plugins.data).toEqual([{ name: 'hello', version: '1.0.0', status: 'loaded' }]);
+    expect(plugins).toEqual([{ name: 'hello', version: '1.0.0', status: 'loaded' }]);
 
-    const missing = await page.evaluate(async () => (await fetch('/api/nope')).json());
-    expect(missing.code).toBe(3007);
+    const missing = await page.evaluate(async () => {
+      const res = await fetch('/api/nope');
+      return { ok: res.ok, status: res.status, body: await res.json() };
+    });
+    expect(missing).toEqual({
+      ok: false,
+      status: 404,
+      body: { code: 'NOT_FOUND', message: 'api /api/nope not found' },
+    });
   });
 
   test('rejects other hosts (404) and cross-origin requests (403)', async () => {
@@ -81,15 +91,24 @@ test.describe('app', () => {
 
   test('calls the hello plugin JSON and SSE APIs', async () => {
     const greet = await page.evaluate(async () => (await fetch('/api/plugins/hello/greet?name=Tom')).json());
-    expect(greet).toEqual({ code: 0, msg: 'success', data: { message: 'hello, Tom' } });
+    expect(greet).toEqual({ message: 'hello, Tom' });
 
-    const bad = await page.evaluate(async () => (await fetch('/api/plugins/hello/greet')).json());
-    expect(bad).toEqual({ code: 3006, msg: 'name is required', data: '' });
+    const bad = await page.evaluate(async () => {
+      const res = await fetch('/api/plugins/hello/greet');
+      return { status: res.status, body: await res.json() };
+    });
+    expect(bad).toEqual({ status: 400, body: { code: 'BAD_REQUEST', message: 'name is required' } });
 
     const echo = await page.evaluate(async () =>
       (await fetch('/api/plugins/hello/echo', { method: 'POST', body: JSON.stringify({ text: 'hi' }) })).json(),
     );
-    expect(echo.data).toEqual({ text: 'hi', length: 2 });
+    expect(echo).toEqual({ text: 'hi', length: 2 });
+
+    const invalid = await page.evaluate(async () => {
+      const res = await fetch('/api/plugins/hello/echo', { method: 'POST', body: '{}' });
+      return { status: res.status, body: await res.json() };
+    });
+    expect(invalid).toEqual({ status: 422, body: { code: 'HELLO_TEXT_INVALID', message: 'text must be a string' } });
 
     const sse = await page.evaluate(async () => {
       const res = await fetch('/api/plugins/hello/count?n=3');
@@ -186,23 +205,69 @@ test.describe('app', () => {
     expect(events).toEqual(['progress:{"i":1,"total":2}', 'progress:{"i":2,"total":2}', 'complete:{"done":true}']);
   });
 
-  test('submits AutoImport tasks', async () => {
-    const put = await page.evaluate(async () =>
-      (
-        await fetch('/api/tasks', {
-          method: 'PUT',
-          body: JSON.stringify({ tasks: [{ id: 'sync', intervalSec: 10, data: { a: 1 } }] }),
-        })
-      ).json(),
+  test('main-process timers notify the owning page and are cleared on reload', async () => {
+    const state = await page.evaluate(() => window.app.timers.set({ id: 't', intervalSec: 1, data: { a: 1 } }));
+    expect(state).toMatchObject({ id: 't', intervalSec: 1 });
+    const tick = await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const off = window.app.timers.onTick((t) => {
+            off();
+            resolve(t);
+          });
+        }),
     );
-    expect(put.code).toBe(0);
-    expect(put.data[0]).toMatchObject({ id: 'sync', intervalSec: 10 });
-    const invalid = await page.evaluate(async () =>
-      (
-        await fetch('/api/tasks', { method: 'PUT', body: JSON.stringify({ tasks: [{ id: 'x', intervalSec: 1 }] }) })
-      ).json(),
+    expect(tick).toMatchObject({ id: 't', data: { a: 1 } });
+    expect(await page.evaluate(() => window.app.timers.list())).toHaveLength(1);
+
+    const invalid = await page.evaluate(() =>
+      window.app.timers.set({ id: 'x', intervalSec: 0 }).then(
+        () => 'ok',
+        (e) => String(e),
+      ),
     );
-    expect(invalid.code).toBe(3006);
+    expect(invalid).toMatch(/intervalSec/);
+
+    await page.reload();
+    await page.waitForLoadState('domcontentloaded');
+    expect(await page.evaluate(() => window.app.timers.list())).toEqual([]);
+  });
+
+  test('API runs in a separate utility process and is restarted after a crash', async () => {
+    const pid = await app.evaluate(
+      ({ app }) => app.getAppMetrics().find((m) => m.type === 'Utility' && m.name === 'API Service')?.pid,
+    );
+    expect(pid).toBeGreaterThan(0);
+    expect(pid).not.toBe(await app.evaluate(() => process.pid));
+
+    process.kill(pid!, 'SIGKILL');
+    await expect
+      .poll(async () => page.evaluate(async () => (await fetch('/api/ping')).status), { timeout: 15_000 })
+      .toBe(200);
+    const newPid = await app.evaluate(
+      ({ app }) => app.getAppMetrics().find((m) => m.type === 'Utility' && m.name === 'API Service')?.pid,
+    );
+    expect(newPid).toBeGreaterThan(0);
+    expect(newPid).not.toBe(pid);
+    expect(await page.evaluate(async () => (await fetch('/api/plugins')).json())).toEqual([
+      { name: 'hello', version: '1.0.0', status: 'loaded' },
+    ]);
+  });
+
+  test('IPC window operations act on the sender window', async () => {
+    const secondId = await app.evaluate(async ({ app, BrowserWindow }) => {
+      const preload = `${app.getAppPath()}/.vite/build/preload.cjs`;
+      const w = new BrowserWindow({ show: true, webPreferences: { preload, sandbox: true, contextIsolation: true } });
+      await w.loadURL('chttp://localhost/');
+      return w.id;
+    });
+    const second = app.windows().find((p) => p !== page)!;
+    await second.evaluate(() => window.app.window.minimize());
+    await expect
+      .poll(() => app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)!.isMinimized(), secondId))
+      .toBe(true);
+    expect(await (await app.browserWindow(page)).evaluate((w) => w.isMinimized())).toBe(false);
+    await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)!.destroy(), secondId);
   });
 
   test('rejects non-http(s) URLs in openExternal', async () => {
@@ -251,8 +316,7 @@ test.describe('app', () => {
     await page.click('#btn-close');
     await page.click('#close-tray');
     await expect.poll(() => win((w) => w.isVisible())).toBe(false);
-    const pong = await page.evaluate(async () => (await fetch('/api/ping')).json());
-    expect(pong.code).toBe(0);
+    expect(await page.evaluate(async () => (await fetch('/api/ping')).ok)).toBe(true);
     await win((w) => w.show()); // 等价于托盘“显示主窗口”
 
     // 每次都询问（不记住选择）；选择退出后应用退出
@@ -282,5 +346,22 @@ test.describe('app', () => {
     const closed = new Promise<void>((resolve) => app.once('close', () => resolve()));
     await win((w) => w.close());
     await closed;
+  });
+
+  test('close flow: a hung page does not block closing', async () => {
+    // 页面接管了关闭（复选框默认勾选），随后主线程卡死：preload 无法回执，主进程超时后直接关闭
+    const closed = new Promise<void>((resolve) => app.once('close', () => resolve()));
+    void page
+      .evaluate(() => {
+        for (;;) {
+          /* 卡死 */
+        }
+      })
+      .catch(() => {});
+    await page.waitForTimeout(200);
+    const started = Date.now();
+    await win((w) => w.close());
+    await closed;
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 });

@@ -1,21 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { app } from 'electron';
-import type { PluginDefinition, RouteRegistrar } from '@app/sdk';
+import type { Logger, PluginDefinition, RouteRegistrar } from '@app/sdk';
 import type { PluginStatus } from '@shared/api';
-import type { Router } from '../chttp/router';
-import { createLogger } from '../logger';
+import type { Router } from '../router';
 
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
-const loaded: PluginDefinition[] = [];
-const log = createLogger('plugins');
 
-export function pluginRoot(): string {
-  return app.isPackaged
-    ? path.join(app.getAppPath(), 'plugins') // …\resources\app.asar\plugins
-    : path.join(app.getAppPath(), '.plugins');
+export interface LoadOptions {
+  root: string;
+  app: { version: string; isPackaged: boolean };
+  createLogger: (scope: string) => Logger;
+  setupTimeoutMs?: number;
 }
+
+const loaded: PluginDefinition[] = [];
+let log: Logger = console;
 
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -29,35 +29,20 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 function sealableScope(router: Router, prefix: string): { registrar: RouteRegistrar; seal(): void } {
   const scoped = router.scope(prefix);
   let open = true;
-  const check = (): void => {
-    if (!open) throw new Error(`routes under ${prefix} can only be registered during setup`);
-  };
+  const guard =
+    <A extends unknown[]>(fn: (...a: A) => void) =>
+    (...a: A): void => {
+      if (!open) throw new Error(`routes under ${prefix} can only be registered during setup`);
+      fn(...a);
+    };
   return {
     registrar: {
-      get: (p, h) => {
-        check();
-        scoped.get(p, h);
-      },
-      post: (p, h) => {
-        check();
-        scoped.post(p, h);
-      },
-      put: (p, h) => {
-        check();
-        scoped.put(p, h);
-      },
-      patch: (p, h) => {
-        check();
-        scoped.patch(p, h);
-      },
-      delete: (p, h) => {
-        check();
-        scoped.delete(p, h);
-      },
-      sse: (p, h, m) => {
-        check();
-        scoped.sse(p, h, m);
-      },
+      get: guard((p, h) => scoped.get(p, h)),
+      post: guard((p, h) => scoped.post(p, h)),
+      put: guard((p, h) => scoped.put(p, h)),
+      patch: guard((p, h) => scoped.patch(p, h)),
+      delete: guard((p, h) => scoped.delete(p, h)),
+      sse: guard((p, h, m) => scoped.sse(p, h, m)),
     },
     seal: () => {
       open = false;
@@ -65,7 +50,9 @@ function sealableScope(router: Router, prefix: string): { registrar: RouteRegist
   };
 }
 
-export async function loadPlugins(router: Router, root = pluginRoot(), setupTimeoutMs = 3000): Promise<PluginStatus[]> {
+export async function loadPlugins(router: Router, opts: LoadOptions): Promise<PluginStatus[]> {
+  const { root, setupTimeoutMs = 3000 } = opts;
+  log = opts.createLogger('plugins');
   const statuses: PluginStatus[] = [];
   const entries = await fs.promises.readdir(root, { withFileTypes: true }).catch(() => []);
   const names = entries
@@ -84,11 +71,7 @@ export async function loadPlugins(router: Router, root = pluginRoot(), setupTime
       if (!def || def.name !== name || typeof def.setup !== 'function') {
         throw new Error('plugin must default-export definePlugin({ name: <dir name>, ... })');
       }
-      const ctx = {
-        name,
-        logger: createLogger(`plugin:${name}`),
-        app: { version: app.getVersion(), isPackaged: app.isPackaged },
-      };
+      const ctx = { name, logger: opts.createLogger(`plugin:${name}`), app: { ...opts.app } };
       await withTimeout(
         Promise.resolve().then(() => def.setup(scope.registrar, ctx)),
         setupTimeoutMs,
@@ -109,7 +92,7 @@ export async function loadPlugins(router: Router, root = pluginRoot(), setupTime
 
 export async function disposePlugins(timeoutMs = 3000): Promise<void> {
   await Promise.all(
-    loaded.map((p) =>
+    loaded.splice(0).map((p) =>
       withTimeout(
         Promise.resolve().then(() => p.dispose?.()),
         timeoutMs,

@@ -1,5 +1,5 @@
 // src/sdk/index.ts —— 插件唯一允许导入的内部模块
-export { ApiError, Codes } from '@shared/api';
+export { ApiError, ErrorCodes } from '@shared/api';
 
 export interface ApiRequest {
   readonly method: string;
@@ -22,12 +22,14 @@ export interface SseSendOptions {
 export interface SseStream {
   readonly isClosed: boolean;
   send(data: unknown, opts?: SseSendOptions): void;
-  error(code: number, msg: string): void;
+  /** 发送 `event: error`，data 为 { code, message }，随后关闭 */
+  error(code: string, message: string): void;
   onClose(cb: () => void): void;
   close(): void;
 }
 
 export type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+/** 返回值以 200 + JSON 响应；返回 undefined 时为 204；直接返回 Response 则原样透传 */
 export type JsonHandler = (req: ApiRequest) => unknown;
 export type SseHandler = (req: ApiRequest, sse: SseStream) => void | Promise<void>;
 
@@ -53,6 +55,7 @@ export interface PluginContext {
   readonly app: { readonly version: string; readonly isPackaged: boolean };
 }
 
+/** 插件运行在 API 服务进程（utilityProcess）中：可用 Node 能力，不能使用 BrowserWindow、app 等主进程 API */
 export interface PluginDefinition {
   name: string;
   version: string;

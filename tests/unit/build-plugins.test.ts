@@ -29,13 +29,13 @@ const write = (rel: string, code: string) => {
 };
 
 const okPlugin = (name: string, extra = '') => `
-import { definePlugin, ApiError, Codes } from '@app/sdk';
+import { definePlugin, ApiError } from '@app/sdk';
 import os from 'node:os';
 import { join } from 'path';
 ${extra}
 export const helper = () => join(os.tmpdir(), 'x');
 export default definePlugin({ name: '${name}', version: '1.0.0', setup(r) {
-  r.get('/x', () => { throw new ApiError(Codes.PARAM_INVALID, 'x'); });
+  r.get('/x', () => { throw new ApiError(400, 'x'); });
 } });
 `;
 
@@ -88,14 +88,11 @@ describe('buildPlugins', () => {
 
   it('fails when a plugin imports internal modules under src/', async () => {
     const internal = path
-      .relative(path.join(src, 'alpha'), path.join(ROOT, 'src', 'main', 'tasks', 'auto-import'))
+      .relative(path.join(src, 'alpha'), path.join(ROOT, 'src', 'main', 'timers'))
       .split(path.sep)
       .join('/');
-    write(
-      'alpha/index.ts',
-      okPlugin('alpha', `import { AutoImportScheduler } from '${internal}'; console.debug(AutoImportScheduler);`),
-    );
-    await expect(buildPlugins(out, src)).rejects.toThrow(/plugin "alpha" must not import .*auto-import/);
+    write('alpha/index.ts', okPlugin('alpha', `import { Timers } from '${internal}'; console.debug(Timers);`));
+    await expect(buildPlugins(out, src)).rejects.toThrow(/plugin "alpha" must not import .*timers/);
   });
 
   it('allows @shared re-exported through the SDK', async () => {

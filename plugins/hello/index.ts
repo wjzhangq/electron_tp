@@ -1,4 +1,4 @@
-import { ApiError, Codes, definePlugin } from '@app/sdk';
+import { ApiError, definePlugin } from '@app/sdk';
 
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve) => {
@@ -20,14 +20,14 @@ export default definePlugin({
     // GET /api/plugins/hello/greet?name=Tom
     router.get('/greet', (req) => {
       const who = req.query.get('name');
-      if (!who) throw new ApiError(Codes.PARAM_INVALID, 'name is required');
+      if (!who) throw new ApiError(400, 'name is required');
       return { message: `hello, ${who}` };
     });
 
     // POST /api/plugins/hello/echo   body: {"text":"hi"}
     router.post('/echo', async (req) => {
       const body = await req.json<{ text?: string }>();
-      if (typeof body?.text !== 'string') throw new ApiError(40001, 'text must be a string');
+      if (typeof body?.text !== 'string') throw new ApiError(422, 'text must be a string', 'HELLO_TEXT_INVALID');
       return { text: body.text, length: body.text.length };
     });
 
