@@ -365,6 +365,8 @@ export function registerExampleRoutes(router: Router): void {
 
 ### M3 插件与任务
 
+> 本节为 M3 当时的记录。其中 AutoImport（`auto-import.test.ts`、`PUT /api/tasks`）已在后续“架构调整”中被通用定时器取代，当前测试见“需求与测试对应关系”。
+
 | 项 | 状态 |
 |----|------|
 | 需求 | FR-PLG-1~10、FR-TSK-1~7、SDK、示例插件 `hello` |
@@ -401,15 +403,16 @@ export function registerExampleRoutes(router: Router): void {
 |------|----------------|------|
 | FR-BLD | CI 流水线（`.github/workflows/ci.yml`） | 通过（Windows CI） |
 | FR-PRT-2/3、FR-RTE-10 协议层部分 | E2E `rejects other hosts (404) and cross-origin requests (403)` | 通过（Windows CI） |
+| 主进程 ↔ API 服务进程转发 | `forward.test.ts`（真实 `MessageChannel`：流式请求体、413、204、SSE、背压、取消、断连 503）；E2E `API runs in a separate utility process and is restarted after a crash` | 单测通过；E2E Linux 通过，待 Windows CI |
 | FR-PRT-5~8 | `static.test.ts` | 通过 |
 | FR-PRT-9 | `static.test.ts`（开发分支）+ 人工 | 单测通过；HMR 待 Windows 人工验收 |
-| FR-RTE | `router.test.ts` | 通过 |
+| FR-RTE、错误模型 | `router.test.ts`、`shared-api.test.ts`、`renderer-api.test.ts` | 通过 |
 | FR-SSE | `sse.test.ts` | 通过 |
 | FR-PLG | `loader.test.ts`、`build-plugins.test.ts` | 通过 |
-| FR-TSK | `auto-import.test.ts` | 通过 |
+| 定时器（取代 FR-TSK） | `timers.test.ts`；E2E `main-process timers notify the owning page and are cleared on reload` | 单测通过；E2E Linux 通过，待 Windows CI |
 | FR-LOG-2/3 | `logger.test.ts` | 通过 |
 | FR-LOG-5/6 | 人工验收（`logger.test.ts` 另覆盖了转储清理） | 待人工验收 |
-| FR-WIN、FR-IPC | E2E（最小化/最大化、关闭流程、刷新重置、openExternal 协议限制、导航/弹窗限制）+ 人工 | E2E 通过（Windows CI）；其余待人工验收 |
+| FR-WIN、FR-IPC | E2E（最小化/最大化、关闭流程、刷新重置、页面卡死时关闭、IPC 作用于调用方窗口、openExternal 协议限制、导航/弹窗限制）+ 人工 | 原有用例 Windows CI 通过；新增用例 Linux 通过，待 Windows CI；其余待人工验收 |
 | SEC | `check:tamper` + M4 人工核对 | `check:tamper` 通过（Windows CI）；人工核对待验收 |
 | PERF | M4 人工实测 | 待人工验收 |
 
@@ -426,4 +429,14 @@ export function registerExampleRoutes(router: Router): void {
 | 多窗口 | 窗口状态按 `BrowserWindow` 存放；所有窗口经 `createWindow()` 创建；IPC 按 sender 定位窗口；主题变化广播到所有窗口。 |
 | 定时器 | 删除 AutoImport 与 `/api/tasks`，改为页面私有的 `window.app.timers`（`src/main/timers.ts`）。 |
 | 错误模型 | HTTP 状态码表达成败，失败体 `{ code, message }`，`code` 为单一字符串命名空间；删除 `{ code, msg, data }` 包装与数字业务码。 |
+
+验证情况（Linux 容器 + Xvfb + openbox）：
+
+| 检查 | 结果 |
+|------|------|
+| `npm run lint`、`npm run typecheck` | ✅ 通过 |
+| `npm test` | ✅ 119/119 通过，覆盖率高于 80% 阈值 |
+| `npm run test:e2e` | ✅ 17/17 通过（新增：定时器、API 服务进程崩溃重启、多窗口 IPC、页面卡死关闭） |
+| 打包布局 | ✅ 用 Linux Electron 运行打包出的 `app.asar`（`isPackaged === true`）：服务进程从 asar 内加载 `api.cjs`，并从 `app.asar/plugins` 加载 `hello` 插件 |
+| Windows（`make`、E2E、`check:tamper`） | 待 CI 运行 |
 
