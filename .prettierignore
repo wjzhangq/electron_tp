@@ -1,0 +1,9 @@
+node_modules/
+.vite/
+out/
+.plugins/
+coverage/
+test-results/
+playwright-report/
+package-lock.json
+*.md
