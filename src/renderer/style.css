@@ -1,0 +1,95 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #f3f4f6;
+  --border: #d0d7de;
+  --accent: #2563eb;
+}
+:root.dark {
+  --bg: #16181d;
+  --fg: #e6e6e6;
+  --muted: #22252b;
+  --border: #3a3f47;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding-left: 12px;
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.titlebar .controls {
+  display: flex;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+.titlebar .controls button {
+  width: 46px;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+.titlebar .controls button:hover {
+  background: rgba(127, 127, 127, 0.2);
+}
+.titlebar .controls button.close:hover {
+  background: #e81123;
+  color: #fff;
+}
+main {
+  padding: 16px 24px;
+}
+section {
+  margin-bottom: 20px;
+}
+button {
+  margin: 0 6px 6px 0;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--muted);
+  color: inherit;
+  cursor: pointer;
+}
+pre {
+  padding: 8px;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre-wrap;
+}
+.dialog {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+}
+.dialog[hidden] {
+  display: none;
+}
+.dialog-body {
+  padding: 20px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}

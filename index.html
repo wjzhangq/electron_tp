@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My App</title>
+  </head>
+  <body>
+    <header class="titlebar">
+      <span class="title">My App</span>
+      <div class="controls">
+        <button id="btn-min" title="最小化">&#x2013;</button>
+        <button id="btn-max" title="最大化">&#x25A1;</button>
+        <button id="btn-close" class="close" title="关闭">&#x2715;</button>
+      </div>
+    </header>
+
+    <main>
+      <h1>chttp 桌面壳示例</h1>
+      <section>
+        <h2>应用信息</h2>
+        <pre id="info">加载中…</pre>
+        <button id="btn-logs">打开日志目录</button>
+        <button id="btn-devtools">切换 DevTools（仅开发）</button>
+      </section>
+      <section>
+        <h2>接口</h2>
+        <button id="btn-ping">GET /api/ping</button>
+        <button id="btn-greet">GET /api/plugins/hello/greet</button>
+        <button id="btn-count">SSE /api/plugins/hello/count</button>
+        <button id="btn-tasks">PUT /api/tasks</button>
+        <pre id="output"></pre>
+      </section>
+      <section>
+        <h2>关闭行为</h2>
+        <label><input type="checkbox" id="chk-close" checked /> 页面接管关闭（每次询问）</label>
+      </section>
+    </main>
+
+    <div id="close-dialog" class="dialog" hidden>
+      <div class="dialog-body">
+        <p>关闭窗口时：</p>
+        <button id="close-tray">最小化到托盘</button>
+        <button id="close-quit">退出</button>
+        <button id="close-cancel">取消</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/renderer/main.ts"></script>
+  </body>
+</html>
