@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SseStreamImpl } from '../../src/main/chttp/sse';
-import { Router } from '../../src/main/chttp/router';
+import { SseStreamImpl } from '../../src/api/sse';
+import { Router } from '../../src/api/router';
 import { ApiError } from '../../src/shared/api';
 
 const quiet = { warn: () => {}, error: () => {} };
@@ -53,10 +53,10 @@ describe('SseStreamImpl encoding', () => {
     const sse = new SseStreamImpl(0, 1024 * 1024, quiet);
     const onClose = vi.fn();
     sse.onClose(onClose);
-    sse.error(30004, 'oops');
+    sse.error('INTERNAL', 'oops');
     expect(sse.isClosed).toBe(true);
     expect(onClose).toHaveBeenCalledOnce();
-    expect(await readAll(sse.body)).toBe('event: error\ndata: {"code":30004,"msg":"oops"}\n\n');
+    expect(await readAll(sse.body)).toBe('event: error\ndata: {"code":"INTERNAL","message":"oops"}\n\n');
   });
 });
 
@@ -158,16 +158,16 @@ describe('SSE through Router', () => {
     const r = new Router({ logger: quiet, heartbeatMs: 0 });
     r.sse('/api/s', async (_req, sse) => {
       sse.send({ i: 1 }, { event: 'progress' });
-      throw new ApiError(40002, 'nope');
+      throw new ApiError(409, 'nope', 'NOPE');
     });
     r.sse('/api/t', () => {
       throw new Error('hidden');
     });
     expect(await (await open(r)).text()).toBe(
-      'event: progress\ndata: {"i":1}\n\nevent: error\ndata: {"code":40002,"msg":"nope"}\n\n',
+      'event: progress\ndata: {"i":1}\n\nevent: error\ndata: {"code":"NOPE","message":"nope"}\n\n',
     );
     expect(await (await open(r, '/api/t')).text()).toBe(
-      'event: error\ndata: {"code":30004,"msg":"internal error"}\n\n',
+      'event: error\ndata: {"code":"INTERNAL","message":"internal error"}\n\n',
     );
   });
 

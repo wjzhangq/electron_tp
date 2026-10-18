@@ -14,6 +14,9 @@ const on = <C extends keyof EventChannels>(c: C, cb: (...args: EventChannels[C])
   };
 };
 
+// 先于页面的回调注册：只要渲染进程主线程还能执行 JS 就立即回执，主进程据此判断页面是否卡死
+ipcRenderer.on('window:close-requested', () => send('window:close-ack'));
+
 let closeHandlers = 0;
 
 const bridge: AppBridge = {
@@ -39,8 +42,13 @@ const bridge: AppBridge = {
     },
     onMaximizeChanged: (cb) => on('window:maximize-changed', cb),
   },
+  timers: {
+    set: (timer) => invoke('timers:set', timer),
+    clear: (id) => invoke('timers:clear', id),
+    list: () => invoke('timers:list'),
+    onTick: (cb) => on('timers:tick', cb),
+  },
   onThemeChanged: (cb) => on('theme:changed', cb),
-  onAutoImport: (cb) => on('auto-import:tick', cb),
 };
 
 contextBridge.exposeInMainWorld('app', bridge);

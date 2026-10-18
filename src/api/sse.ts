@@ -41,8 +41,8 @@ export class SseStreamImpl implements SseStream {
     this.write(lines.join('\n') + '\n\n');
   }
 
-  error(code: number, msg: string): void {
-    this.send({ code, msg }, { event: 'error' });
+  error(code: string, message: string): void {
+    this.send({ code, message }, { event: 'error' });
     this.close();
   }
 

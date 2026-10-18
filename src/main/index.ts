@@ -1,16 +1,12 @@
 import path from 'node:path';
 import { app, powerMonitor } from 'electron';
 import { handleChttp, registerChttpScheme } from './chttp/scheme';
-import { Router } from './chttp/router';
 import { createStaticHandler } from './chttp/static';
+import { ApiHost } from './chttp/api-host';
 import { applySecurityPolicy } from './security';
-import { getMainWindow, createMainWindow, showMainWindow } from './window';
+import { createMainWindow, showMainWindow } from './window';
 import { createTray } from './tray';
-import { registerIpc } from './ipc';
-import { disposePlugins, loadPlugins } from './plugins/loader';
-import { registerSystemRoutes } from './routes/system';
-import { registerTaskRoutes } from './routes/tasks';
-import { AutoImportScheduler } from './tasks/auto-import';
+import { createTimers, registerIpc } from './ipc';
 import { closeFileLog, initFileLog, logger, pruneCrashDumps, startCrashReporter } from './logger';
 
 // 由 Forge Vite 插件注入
@@ -30,10 +26,8 @@ if (!app.requestSingleInstanceLock()) {
     if (app.isReady()) showMainWindow();
   });
 
-  const scheduler = new AutoImportScheduler((tick) => {
-    const w = getMainWindow();
-    if (w && !w.isDestroyed()) w.webContents.send('auto-import:tick', tick);
-  });
+  const timers = createTimers();
+  let api: ApiHost | undefined;
 
   app
     .whenReady()
@@ -42,28 +36,36 @@ if (!app.requestSingleInstanceLock()) {
       pruneCrashDumps();
       applySecurityPolicy();
 
-      const router = new Router({ exposeErrors: !app.isPackaged, logger });
-      registerSystemRoutes(router);
-      registerTaskRoutes(router, scheduler);
-      const pluginStatuses = await loadPlugins(router);
-      router.get('/api/plugins', () => pluginStatuses);
-
+      api = new ApiHost({
+        // Forge Vite 插件把 src/api/index.ts 输出为 .vite/build/api.cjs（见 vite.api.config.ts）
+        entry: path.join(__dirname, 'api.cjs'),
+        config: {
+          pluginRoot: app.isPackaged
+            ? path.join(app.getAppPath(), 'plugins') // …\resources\app.asar\plugins
+            : path.join(app.getAppPath(), '.plugins'),
+          exposeErrors: !app.isPackaged,
+          app: { version: app.getVersion(), isPackaged: app.isPackaged },
+        },
+      });
+      const started = api.start();
+      const host = api;
       handleChttp(
-        router,
+        (req) => host.handle(req),
         createStaticHandler({
           root: path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}`),
           devServerUrl: MAIN_WINDOW_VITE_DEV_SERVER_URL,
         }),
       );
 
-      registerIpc();
+      registerIpc(timers);
       createMainWindow();
       createTray();
 
-      powerMonitor.on('suspend', () => scheduler.pauseAll());
-      powerMonitor.on('resume', () => scheduler.restartAll());
+      powerMonitor.on('suspend', () => timers.pauseAll());
+      powerMonitor.on('resume', () => timers.resumeAll());
 
-      logger.info(`started, plugins: ${pluginStatuses.map((p) => `${p.name}(${p.status})`).join(', ') || 'none'}`);
+      const plugins = await started;
+      logger.info(`started, plugins: ${plugins.map((p) => `${p.name}(${p.status})`).join(', ') || 'none'}`);
     })
     .catch((e) => {
       // 例如内置路由重复注册（FR-RTE-7）
@@ -79,8 +81,8 @@ if (!app.requestSingleInstanceLock()) {
     if (disposed) return;
     e.preventDefault();
     disposed = true;
-    scheduler.dispose();
-    void disposePlugins().finally(() => {
+    timers.dispose();
+    void (api?.stop() ?? Promise.resolve()).finally(() => {
       closeFileLog();
       // 放到下一个宏任务再退出：在 will-quit 派发过程中（微任务里）同步调用 app.quit() 会被 Electron 忽略
       setImmediate(() => app.quit());

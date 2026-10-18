@@ -1,5 +1,5 @@
-// 不依赖 electron（FR-RTE-11）
-import { Codes, fail, isApiError, ok } from '@shared/api';
+// 运行在 API 服务进程中，不依赖 electron（FR-RTE-11）
+import { ErrorCodes, isApiError, type ApiErrorBody } from '@shared/api';
 import type { ApiRequest, JsonHandler, Logger, Method, RouteRegistrar, SseHandler } from '@app/sdk';
 import { SseStreamImpl } from './sse';
 
@@ -29,15 +29,21 @@ export const defaultRouterOptions: RouterOptions = {
   logger: console,
 };
 
-const json = (body: unknown): Response =>
-  new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-  });
+const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+
+const json = (status: number, body: unknown, headers: Record<string, string> = {}): Response =>
+  new Response(JSON.stringify(body), { status, headers: { ...JSON_HEADERS, ...headers } });
+
+export const errorResponse = (
+  status: number,
+  code: string,
+  message: string,
+  headers?: Record<string, string>,
+): Response => json(status, { code, message } satisfies ApiErrorBody, headers);
 
 /** 与 ApiError 字段一致的错误对象（Router 不依赖插件各自打包的 ApiError 类） */
-const apiError = (code: number, message: string): Error =>
-  Object.assign(new Error(message), { name: 'ApiError', code });
+const apiError = (status: number, code: string, message: string): Error =>
+  Object.assign(new Error(message), { name: 'ApiError', status, code });
 
 function compile(path: string): { pattern: RegExp; keys: string[] } {
   const keys: string[] = [];
@@ -105,15 +111,19 @@ export class Router implements RouteRegistrar {
   }
 
   async dispatch(req: Request, url: URL): Promise<Response> {
-    let matchedPath = false;
+    const allowed: string[] = [];
     for (const route of this.table) {
       const m = route.pattern.exec(url.pathname);
       if (!m) continue;
-      matchedPath = true;
-      if (route.method !== req.method) continue;
+      if (route.method !== req.method) {
+        allowed.push(route.method);
+        continue;
+      }
 
       const length = Number(req.headers.get('content-length') ?? 0);
-      if (length > this.options.maxBodyBytes) return json(fail(Codes.PAYLOAD_TOO_LARGE, 'payload too large'));
+      if (length > this.options.maxBodyBytes) {
+        return errorResponse(413, ErrorCodes.PAYLOAD_TOO_LARGE, 'payload too large');
+      }
 
       const params: Record<string, string> = {};
       try {
@@ -121,7 +131,7 @@ export class Router implements RouteRegistrar {
           params[k] = decodeURIComponent(m[i + 1] ?? '');
         });
       } catch {
-        return json(fail(Codes.PARAM_INVALID, 'invalid path parameter encoding')); // FR-RTE-10
+        return errorResponse(400, ErrorCodes.BAD_REQUEST, 'invalid path parameter encoding'); // FR-RTE-10
       }
       const apiReq = this.toApiRequest(req, url, params);
 
@@ -129,21 +139,36 @@ export class Router implements RouteRegistrar {
         ? this.runSse(route.handler as SseHandler, apiReq)
         : this.runJson(route.handler as JsonHandler, apiReq);
     }
-    return matchedPath
-      ? json(fail(Codes.METHOD_NOT_ALLOWED, `method ${req.method} not allowed`))
-      : json(fail(Codes.NOT_FOUND, `api ${url.pathname} not found`));
+    return allowed.length > 0
+      ? errorResponse(405, ErrorCodes.METHOD_NOT_ALLOWED, `method ${req.method} not allowed`, {
+          Allow: [...new Set(allowed)].join(', '),
+        })
+      : errorResponse(404, ErrorCodes.NOT_FOUND, `api ${url.pathname} not found`);
   }
 
   private toApiRequest(req: Request, url: URL, params: Record<string, string>): ApiRequest & { abort(): void } {
     const controller = new AbortController();
     const max = this.options.maxBodyBytes;
     let body: Promise<string> | undefined;
-    // FR-RTE-2：请求体只读取一次并缓存
+    // FR-RTE-2：请求体只读取一次并缓存；边读边计数，超限立即中止，不先整体读入内存
     const readText = (): Promise<string> => {
-      body ??= req.text().then((text) => {
-        if (Buffer.byteLength(text) > max) throw apiError(Codes.PAYLOAD_TOO_LARGE, 'payload too large');
-        return text;
-      });
+      body ??= (async () => {
+        if (!req.body) return '';
+        const reader = req.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > max) {
+            void reader.cancel().catch(() => {});
+            throw apiError(413, ErrorCodes.PAYLOAD_TOO_LARGE, 'payload too large');
+          }
+          chunks.push(value);
+        }
+        return Buffer.concat(chunks).toString('utf8');
+      })();
       return body;
     };
     return {
@@ -160,25 +185,32 @@ export class Router implements RouteRegistrar {
         try {
           return (text ? JSON.parse(text) : undefined) as T;
         } catch (e) {
-          throw apiError(Codes.JSON_PARSE, `json parse error: ${(e as Error).message}`);
+          throw apiError(400, ErrorCodes.INVALID_JSON, `json parse error: ${(e as Error).message}`);
         }
       },
     };
   }
 
-  private toFailure(e: unknown) {
-    if (isApiError(e)) return fail(e.code, e.message);
+  private toFailure(e: unknown): { status: number; code: string; message: string } {
+    if (isApiError(e)) return { status: e.status, code: e.code, message: e.message };
     this.options.logger.error('[api] unhandled error', e);
-    return fail(Codes.INTERNAL, this.options.exposeErrors ? String(e) : 'internal error');
+    return {
+      status: 500,
+      code: ErrorCodes.INTERNAL,
+      message: this.options.exposeErrors ? String(e) : 'internal error',
+    };
   }
 
   private async runJson(handler: JsonHandler, req: ApiRequest): Promise<Response> {
     try {
       const result = await handler(req);
       if (result instanceof Response) return result;
-      return json(ok(result === undefined ? null : result));
+      return result === undefined
+        ? new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } })
+        : json(200, result);
     } catch (e) {
-      return json(this.toFailure(e));
+      const f = this.toFailure(e);
+      return errorResponse(f.status, f.code, f.message);
     }
   }
 
@@ -190,7 +222,7 @@ export class Router implements RouteRegistrar {
         await handler(req, sse);
       } catch (e) {
         const f = this.toFailure(e);
-        sse.error(f.code, f.msg);
+        sse.error(f.code, f.message);
       }
     })();
     return new Response(sse.body, {

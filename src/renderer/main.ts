@@ -61,18 +61,13 @@ $('btn-count').addEventListener(
     }
   }),
 );
-$('btn-tasks').addEventListener(
+$('btn-timer').addEventListener(
   'click',
   run(async () => {
-    print(
-      await request('/tasks', {
-        method: 'PUT',
-        body: { tasks: [{ id: 'sync', intervalSec: 10, data: { src: 'a' } }] },
-      }),
-    );
+    print(await window.app.timers.set({ id: 'demo', intervalSec: 10, data: { src: 'a' } }));
   }),
 );
-window.app.onAutoImport((tick) => print({ autoImport: tick }));
+window.app.timers.onTick((tick) => print({ timer: tick }));
 
 // 接管关闭：每次都询问，不记住选择
 const dialog = $('close-dialog');
