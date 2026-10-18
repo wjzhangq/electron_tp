@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/wjzhangq/electron_tp/actions/workflows/ci.yml/badge.svg?branch=claude/eloquent-fermat-tw888z)](https://github.com/wjzhangq/electron_tp/actions/workflows/ci.yml)
 
-只运行在 **Windows x64** 的 Electron 桌面壳：前端页面与后端接口都通过自定义协议 `chttp://localhost` 提供，主进程充当“虚拟 HTTP Server”（**不监听任何端口**），支持 JSON 接口与 SSE 流式接口，业务能力可以内置路由或插件的形式扩展。
+只运行在 **Windows x64** 的 Electron 桌面壳：前端页面与后端接口都通过自定义协议 `chttp://localhost` 提供，“虚拟 HTTP Server”**不监听任何端口**，支持 JSON 接口与 SSE 流式接口，业务能力可以内置路由或插件的形式扩展。
+
+接口处理（Router、插件、内置路由）运行在独立的 **API 服务进程**（Electron `utilityProcess`）中：主进程只负责协议入口的主机名 / Origin 校验、静态资源、窗口、托盘与 IPC，并把 `/api` 请求经每请求一对 `MessagePort` 转发给服务进程。接口里的耗时计算或大文件处理不会卡住窗口拖动、托盘和 IPC；服务进程崩溃后会自动重启（60 秒内最多 3 次，期间接口返回 503）。
 
 ## 快速开始
 
@@ -46,10 +48,11 @@ scripts/build-plugins.ts   插件构建与隔离检查
 scripts/sign-hook.cjs      统一签名钩子（后端待定）
 scripts/sign-cli.cjs       给 Inno SignTool 调用的命令行入口
 scripts/tamper-check.ts    篡改 app.asar 后断言应用拒绝启动
-src/main/                  主进程（协议层、路由、插件加载、窗口、托盘、IPC、日志、定时任务）
+src/main/                  主进程（协议入口与转发、静态资源、API 服务进程管理、窗口、托盘、IPC、日志、定时器）
+src/api/                   API 服务进程（utilityProcess）：Router、SSE、插件加载、内置路由
 src/preload/index.ts       contextBridge → window.app
 src/renderer/              示例前端 + api 客户端（request / stream）
-src/shared/                main / preload / renderer 共享的类型与常量
+src/shared/                main / api / preload / renderer 共享的类型与常量（含主进程 ↔ 服务进程的消息格式 wire.ts）
 src/sdk/index.ts           插件 SDK（插件唯一可导入的内部模块）
 plugins/hello/             示例插件
 tests/unit/                Vitest 单元测试
@@ -116,7 +119,7 @@ npm run make         # out/make/inno/x64/My App_x64_<version>_setup.exe
 |------|------|
 | 自绘标题栏 | 可拖动；右侧按钮依次为最小化、最大化/还原、关闭 |
 | 应用信息 | 显示 `window.app.info()` 的结果；“打开日志目录”；“切换 DevTools”（仅开发模式） |
-| 接口 | `GET /api/ping`、hello 插件的 JSON 接口与 SSE 计数、提交 AutoImport 任务（每 10 秒在输出区显示一次 tick） |
+| 接口 | `GET /api/ping`、hello 插件的 JSON 接口与 SSE 计数、设置主进程定时器（每 10 秒在输出区显示一次 tick） |
 | 关闭行为 | 勾选“页面接管关闭”时，点关闭 / Alt+F4 会弹出询问：最小化到托盘、退出、取消（每次都问，不记住选择）；不勾选则直接退出 |
 | 托盘 | 单击显示主窗口；右键菜单“显示主窗口”“退出”（托盘退出不再询问） |
 | 右键菜单 | 复制、全选；输入框内额外提供剪切、粘贴 |
@@ -131,16 +134,15 @@ npm run make         # out/make/inno/x64/My App_x64_<version>_setup.exe
 import { request, stream } from './api';
 import { ApiError } from '@shared/api';
 
-// JSON 接口：code 为 0 时返回 data，否则抛出 ApiError
+// JSON 接口：2xx 时返回响应数据（204 为 undefined），否则抛出 ApiError
 const { pong } = await request<{ pong: boolean; time: number }>('/ping');
 const greet = await request<{ message: string }>('/plugins/hello/greet', { query: { name: 'Tom' } });
 const echo = await request('/plugins/hello/echo', { body: { text: 'hi' } }); // 有 body 时默认 POST
-await request('/tasks', { method: 'PUT', body: { tasks: [] } });
 
 try {
   await request('/plugins/hello/greet');
 } catch (e) {
-  if (e instanceof ApiError) console.log(e.code, e.message); // 3006 name is required
+  if (e instanceof ApiError) console.log(e.status, e.code, e.message); // 400 BAD_REQUEST name is required
 }
 
 // SSE 接口：逐个产出 { event, data, id }；abort() 或提前 break 即断开连接
@@ -148,38 +150,37 @@ const ac = new AbortController();
 for await (const e of stream<{ i: number; total: number }>('/plugins/hello/count', { query: { n: 5 }, signal: ac.signal })) {
   if (e.event === 'progress') console.log(`${e.data.i}/${e.data.total}`);
   if (e.event === 'complete') break;
-  if (e.event === 'error') throw new Error(JSON.stringify(e.data)); // data 为 { code, msg }
+  if (e.event === 'error') throw new Error(JSON.stringify(e.data)); // data 为 { code, message }
 }
+// 建立连接失败（非 2xx）时 stream() 直接抛出 ApiError；响应不是 text/event-stream 时也会抛错，不会静默结束
 ```
 
-- 返回格式统一为 `{ code, msg, data }`，HTTP 状态码固定 200，错误码见下表。
+- **成败只看 HTTP 状态码**：成功为 200（JSON 响应体就是数据本身）或 204（处理函数返回 `undefined`，无响应体）；失败为 4xx/5xx，响应体统一为 `{ code, message }`。`fetch` 的 `res.ok`、缓存和网关都能正确识别失败。
+- `code` 是唯一的一套机器可读码（大写下划线字符串），默认由状态码推导；只有需要区分同一状态下的不同原因时才自定义（例如 hello 插件的 `HELLO_TEXT_INVALID`），自定义码建议带插件名前缀。
 - 原生 `EventSource` 也能连接，但只支持 GET、无法携带请求体，统一使用 `stream()`。
-- CSP 为 `connect-src 'self'`，页面不能直接请求外部地址；需要时在主进程路由或插件中实现，再通过 `/api` 提供。
+- CSP 为 `connect-src 'self'`，页面不能直接请求外部地址；需要时在内置路由或插件中实现，再通过 `/api` 提供。
 
-| code | 含义 |
-|------|------|
-| 0 | 成功 |
-| 10001 | 通用业务错误 |
-| 3006 | 参数缺失或校验失败 |
-| 3007 | 接口不存在 |
-| 3008 | 请求方法不允许 |
-| 3009 | 请求体过大（默认上限 10 MB） |
-| 30004 | 服务内部异常 |
-| 30005 | 请求体 JSON 解析失败 |
-| 40000–49999 | 插件自定义 |
+| HTTP 状态 | code | 含义 |
+|-----------|------|------|
+| 400 | `BAD_REQUEST` | 参数缺失或校验失败、路径参数编码错误 |
+| 400 | `INVALID_JSON` | 请求体 JSON 解析失败 |
+| 404 | `NOT_FOUND` | 接口不存在 |
+| 405 | `METHOD_NOT_ALLOWED` | 请求方法不允许（响应带 `Allow` 头） |
+| 413 | `PAYLOAD_TOO_LARGE` | 请求体过大（默认上限 10 MB，边读边计数，超限立即中止） |
+| 500 | `INTERNAL` | 服务内部异常（打包后不含细节） |
+| 503 | `UNAVAILABLE` | API 服务进程不可用（重启中或重启次数超限） |
+| 其他 4xx/5xx | 由状态码推导，或插件自定义 | 见 `ErrorCodes`（`src/shared/api.ts`） |
 
 内置接口：
 
-| 方法 | 路径 | 请求 | 响应 `data` |
+| 方法 | 路径 | 请求 | 响应体 |
 |------|------|------|-------------|
 | GET | `/api/ping` | — | `{ pong: true, time }` |
 | GET | `/api/plugins` | — | `[{ name, version, status: 'loaded' \| 'failed', error? }]` |
-| GET | `/api/tasks` | — | `[{ id, intervalSec, nextRunAt }]` |
-| PUT | `/api/tasks` | `{ tasks: [{ id, intervalSec, data }] }` | 同上 |
 
 ### `window.app` 桥接
 
-只用于窗口控制、应用信息等 HTTP 无法表达的能力（类型见 `src/shared/ipc.ts`）：
+只用于窗口控制、应用信息等 HTTP 无法表达的能力（类型见 `src/shared/ipc.ts`）。窗口相关方法都作用于**调用方所在的窗口**（主进程用 `BrowserWindow.fromWebContents(sender)` 定位），多窗口时互不影响：
 
 | 方法 / 事件 | 说明 |
 |-------------|------|
@@ -192,7 +193,8 @@ for await (const e of stream<{ i: number; total: number }>('/plugins/hello/count
 | `window.closeAction('tray' \| 'quit')` | 响应关闭询问 |
 | `window.onMaximizeChanged(cb)` | 最大化状态变化 |
 | `onThemeChanged(cb)` | 系统深色模式变化，参数为 `isDark` |
-| `onAutoImport(cb)` | 定时任务到期，参数为 `{ id, data, nextRunAt }` |
+| `timers.set({ id, intervalSec, data? })` / `timers.clear(id)` / `timers.list()` | 主进程定时器，归属当前页面 |
+| `timers.onTick(cb)` | 定时器到点，参数为 `{ id, data, nextRunAt }` |
 
 所有 `on*` 方法都返回取消订阅函数。
 
@@ -206,17 +208,22 @@ const off = window.app.window.onCloseRequested(async () => {
 // 不再需要接管时调用 off()；页面刷新或渲染进程崩溃后接管自动失效，需要重新注册
 ```
 
-**AutoImport 定时任务**：
+页面卡死时壳不接管关闭：preload 收到关闭请求后会立即回执；如果页面已被报告无响应，或 1.5 秒内没有回执（主线程被同步代码占住），窗口直接关闭，不会出现“点关闭没反应”。
+
+**主进程定时器**：
+
+壳只提供“主进程计时、到点通知页面”这一机制（不受后台页面节流影响），名称、最小间隔和存储策略留给具体业务决定。
 
 ```ts
-window.app.onAutoImport(({ id, data }) => {
-  /* 执行导入 */
+const off = window.app.timers.onTick(({ id, data }) => {
+  /* 到点处理 */
 });
-// 每次提交完整列表：列表外的任务删除；间隔不变只更新 data，不重新计时；intervalSec 为 ≥ 10 的整数
-await request('/tasks', { method: 'PUT', body: { tasks: [{ id: 'sync', intervalSec: 60, data: { src: 'a' } }] } });
+// 新建或更新；同一 id 间隔不变时只替换 data，不重新计时；intervalSec 为正整数秒
+await window.app.timers.set({ id: 'sync', intervalSec: 60, data: { src: 'a' } });
+await window.app.timers.clear('sync');
 ```
 
-任务只保存在内存中，应用重启后需要前端重新提交；页面加载期间或系统睡眠期间的 tick 不补发。
+定时器只保存在内存中，归属调用它的页面：页面刷新、导航、崩溃或窗口关闭后自动清除，需要时由页面重新设置；系统睡眠期间暂停，恢复后从当前时刻重新计时，不补发。
 
 ### 自定义应用
 
@@ -238,7 +245,7 @@ await request('/tasks', { method: 'PUT', body: { tasks: [{ id: 'sync', intervalS
 3. 默认导出 `definePlugin`，`name` 与目录名一致：
 
 ```ts
-import { ApiError, Codes, definePlugin } from '@app/sdk';
+import { ApiError, definePlugin } from '@app/sdk';
 
 export default definePlugin({
   name: 'my-plugin',
@@ -246,7 +253,7 @@ export default definePlugin({
   setup(router, ctx) {
     // 实际路径：/api/plugins/my-plugin/items/:id
     router.get('/items/:id', (req) => {
-      if (!req.params.id) throw new ApiError(Codes.PARAM_INVALID, 'id is required');
+      if (!req.params.id) throw new ApiError(400, 'id is required'); // → 400 { code: 'BAD_REQUEST', message }
       return { id: req.params.id };
     });
     router.sse('/progress', async (req, sse) => {
@@ -263,33 +270,33 @@ export default definePlugin({
 ```
 
 - 路由只能在 `setup` 执行期间注册；`setup` 超时（3 秒）或抛错视为加载失败，已注册的路由会被删除，其他插件不受影响。
-- 插件自定义错误码使用 40000–49999，在插件自己的 README 中说明（示例见 `plugins/hello/README.md`）。
+- 业务错误 `throw new ApiError(status, message, code?)`；需要自定义 `code` 时使用带插件名前缀的大写字符串，并在插件自己的 README 中说明（示例见 `plugins/hello/README.md`）。SSE 中途出错用 `sse.error(code, message)`。
 - `GET /api/plugins` 返回各插件的加载状态。
-- **插件与主进程同进程运行，拥有完整的 Electron/Node 能力，代码必须按主进程代码的标准审查。**
+- 插件运行在 API 服务进程（`utilityProcess`）中：可以使用 Node 能力，但不能使用 `BrowserWindow`、`app` 等主进程专属 API；插件里的阻塞不会卡住窗口，但会阻塞同进程的其他接口，耗时任务仍应异步化或放进 worker。
+- 插件之间以及插件与内置路由共享同一个服务进程，代码仍需按可信代码的标准审查。
 
 ## 新增路由
 
-内置路由放在 `src/main/routes/`，在 `src/main/index.ts` 中注册：
+内置路由放在 `src/api/routes/`，在 `src/api/index.ts` 中注册（运行在 API 服务进程中）：
 
 ```ts
-// src/main/routes/example.ts
-import { ApiError, Codes } from '@shared/api';
-import type { Router } from '../chttp/router';
+// src/api/routes/example.ts
+import { ApiError } from '@shared/api';
+import type { Router } from '../router';
 
 export function registerExampleRoutes(router: Router): void {
   router.post('/api/example', async (req) => {
     const body = await req.json<{ name?: string }>();
-    if (!body?.name) throw new ApiError(Codes.PARAM_INVALID, 'name is required');
-    return { hello: body.name }; // → { code: 0, msg: 'success', data: { hello } }
+    if (!body?.name) throw new ApiError(400, 'name is required');
+    return { hello: body.name }; // → 200 { hello }
   });
 }
 ```
 
-- 返回值包装为 `{code:0,msg:"success",data}`，`undefined` 变为 `null`；直接返回 `Response` 则原样透传。
-- 业务错误 `throw new ApiError(code, msg)`；其他异常统一为 30004（打包后不含堆栈）。
-- `/api` 下 JSON 响应的 HTTP 状态码固定为 200，成败只看 `code`。
+- 返回值直接作为 200 JSON 响应体；返回 `undefined` 时为 204；直接返回 `Response` 则原样透传。
+- 业务错误 `throw new ApiError(status, message, code?)`；其他异常统一为 500 `INTERNAL`（打包后不含细节）。
 - 同一方法 + 同一路径重复注册会抛错，内置路由重复会导致启动失败。
-- 前端统一使用 `src/renderer/api.ts` 的 `request()` / `stream()`；由于 CSP `connect-src 'self'` 且不放开 CORS，访问外部服务需在主进程路由或插件中实现。
+- 前端统一使用 `src/renderer/api.ts` 的 `request()` / `stream()`；由于 CSP `connect-src 'self'` 且不放开 CORS，访问外部服务需在内置路由或插件中实现。
 
 ## 日志与崩溃转储
 
@@ -299,7 +306,7 @@ export function registerExampleRoutes(router: Router): void {
 | 崩溃转储 | `app.getPath('crashDumps')`（默认 `%APPDATA%\My App\Crashpad`），只保存在本地、不上传；启动时只保留最新 10 个 `.dmp` |
 
 - 日志行格式：`<ISO 时间> [<级别>] [<模块>] <内容>`；打包后默认 `info`，开发时 `debug`。
-- 不记录请求体、凭据头和 IPC 参数原文；插件日志同样写入文件，插件自行脱敏。
+- 不记录请求体、凭据头和 IPC 参数原文；API 服务进程（含插件）的日志经消息转交主进程，写入同一个日志文件，插件自行脱敏。
 - 页面可调用 `window.app.openLogs()` 用系统文件管理器打开日志目录，供反馈问题时取用。
 - 应用不做任何遥测，不上传日志或崩溃转储。
 
@@ -409,3 +416,14 @@ export function registerExampleRoutes(router: Router): void {
 ### 待定事项
 
 - 代码签名后端（自建远程服务 / Azure Trusted Signing / 云 HSM 证书）未定，只影响 `scripts/sign-hook.cjs` 与 CI 密钥配置；确定前产出未签名安装包。
+
+### 架构调整（API 服务进程、多窗口、关闭兜底、定时器、错误模型）
+
+| 调整 | 说明 |
+|------|------|
+| API 服务进程 | Router、SSE、插件加载与内置路由移到 `src/api/`，以 `utilityProcess` 运行（构建产物 `.vite/build/api.cjs`）。主进程 `protocol.handle` 只做校验与转发（`src/main/chttp/forward.ts` ↔ `src/api/serve.ts`）：请求体流式上送；响应体按拉取传输，主进程每要一块才从服务进程读一块，SSE 的慢消费者保护（FR-SSE-8）在服务进程照常生效。`src/main/chttp/api-host.ts` 负责启动、崩溃重启（60 秒内最多 3 次）和退出前调用插件 `dispose`。 |
+| 关闭兜底 | preload 对每次 `close-requested` 立即回执；页面无响应或 1.5 秒内无回执时不再接管关闭。E2E `close flow: a hung page does not block closing` 覆盖。 |
+| 多窗口 | 窗口状态按 `BrowserWindow` 存放；所有窗口经 `createWindow()` 创建；IPC 按 sender 定位窗口；主题变化广播到所有窗口。 |
+| 定时器 | 删除 AutoImport 与 `/api/tasks`，改为页面私有的 `window.app.timers`（`src/main/timers.ts`）。 |
+| 错误模型 | HTTP 状态码表达成败，失败体 `{ code, message }`，`code` 为单一字符串命名空间；删除 `{ code, msg, data }` 包装与数字业务码。 |
+
