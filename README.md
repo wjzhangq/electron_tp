@@ -4,6 +4,24 @@
 
 只运行在 **Windows x64** 的 Electron 桌面壳：前端页面与后端接口都通过自定义协议 `chttp://localhost` 提供，主进程充当“虚拟 HTTP Server”（**不监听任何端口**），支持 JSON 接口与 SSE 流式接口，业务能力可以内置路由或插件的形式扩展。
 
+## 快速开始
+
+**直接使用安装包**
+
+1. 打开 [Actions › CI](https://github.com/wjzhangq/electron_tp/actions/workflows/ci.yml)，进入最近一次成功的运行，在 Artifacts 中下载 `installer`，解压得到 `My App_x64_<version>_setup.exe`。
+2. 双击安装（按用户安装，不需要管理员权限）。安装包未签名，SmartScreen 提示时选择“更多信息 → 仍要运行”。
+3. 从开始菜单启动 **My App**。卸载：“设置 → 应用 → 已安装的应用 → My App → 卸载”，会同时删除 `%APPDATA%\My App`。
+
+**从源码运行**
+
+```bash
+git clone https://github.com/wjzhangq/electron_tp.git
+cd electron_tp
+npm ci
+npm start          # 开发模式（Vite HMR）
+npm run make       # 生成安装包 out/make/inno/x64/My App_x64_<version>_setup.exe（需 Inno Setup 6）
+```
+
 ## 版本
 
 | 组件 | 版本（精确锁定） | 说明 |
@@ -87,6 +105,131 @@ npm run make         # out/make/inno/x64/My App_x64_<version>_setup.exe
 | 构件 | `installer`：`out/make/inno/x64/*.exe`；失败时额外上传 `playwright-report`（`test-results/`、`playwright-report/`） |
 
 安装包可在对应 Actions 运行页面的 Artifacts 中下载（未签名）。
+
+## 使用说明
+
+### 示例页面
+
+启动后主窗口加载 `chttp://localhost/`（`index.html` + `src/renderer/main.ts`），用来演示壳的全部能力，业务前端替换这两个文件即可：
+
+| 区域 | 功能 |
+|------|------|
+| 自绘标题栏 | 可拖动；右侧按钮依次为最小化、最大化/还原、关闭 |
+| 应用信息 | 显示 `window.app.info()` 的结果；“打开日志目录”；“切换 DevTools”（仅开发模式） |
+| 接口 | `GET /api/ping`、hello 插件的 JSON 接口与 SSE 计数、提交 AutoImport 任务（每 10 秒在输出区显示一次 tick） |
+| 关闭行为 | 勾选“页面接管关闭”时，点关闭 / Alt+F4 会弹出询问：最小化到托盘、退出、取消（每次都问，不记住选择）；不勾选则直接退出 |
+| 托盘 | 单击显示主窗口；右键菜单“显示主窗口”“退出”（托盘退出不再询问） |
+| 右键菜单 | 复制、全选；输入框内额外提供剪切、粘贴 |
+
+应用为单实例：再次启动时会恢复并聚焦已打开的窗口。
+
+### 前端调用接口
+
+页面与接口同源，直接用相对路径；推荐使用 `src/renderer/api.ts` 封装的客户端：
+
+```ts
+import { request, stream } from './api';
+import { ApiError } from '@shared/api';
+
+// JSON 接口：code 为 0 时返回 data，否则抛出 ApiError
+const { pong } = await request<{ pong: boolean; time: number }>('/ping');
+const greet = await request<{ message: string }>('/plugins/hello/greet', { query: { name: 'Tom' } });
+const echo = await request('/plugins/hello/echo', { body: { text: 'hi' } }); // 有 body 时默认 POST
+await request('/tasks', { method: 'PUT', body: { tasks: [] } });
+
+try {
+  await request('/plugins/hello/greet');
+} catch (e) {
+  if (e instanceof ApiError) console.log(e.code, e.message); // 3006 name is required
+}
+
+// SSE 接口：逐个产出 { event, data, id }；abort() 或提前 break 即断开连接
+const ac = new AbortController();
+for await (const e of stream<{ i: number; total: number }>('/plugins/hello/count', { query: { n: 5 }, signal: ac.signal })) {
+  if (e.event === 'progress') console.log(`${e.data.i}/${e.data.total}`);
+  if (e.event === 'complete') break;
+  if (e.event === 'error') throw new Error(JSON.stringify(e.data)); // data 为 { code, msg }
+}
+```
+
+- 返回格式统一为 `{ code, msg, data }`，HTTP 状态码固定 200，错误码见下表。
+- 原生 `EventSource` 也能连接，但只支持 GET、无法携带请求体，统一使用 `stream()`。
+- CSP 为 `connect-src 'self'`，页面不能直接请求外部地址；需要时在主进程路由或插件中实现，再通过 `/api` 提供。
+
+| code | 含义 |
+|------|------|
+| 0 | 成功 |
+| 10001 | 通用业务错误 |
+| 3006 | 参数缺失或校验失败 |
+| 3007 | 接口不存在 |
+| 3008 | 请求方法不允许 |
+| 3009 | 请求体过大（默认上限 10 MB） |
+| 30004 | 服务内部异常 |
+| 30005 | 请求体 JSON 解析失败 |
+| 40000–49999 | 插件自定义 |
+
+内置接口：
+
+| 方法 | 路径 | 请求 | 响应 `data` |
+|------|------|------|-------------|
+| GET | `/api/ping` | — | `{ pong: true, time }` |
+| GET | `/api/plugins` | — | `[{ name, version, status: 'loaded' \| 'failed', error? }]` |
+| GET | `/api/tasks` | — | `[{ id, intervalSec, nextRunAt }]` |
+| PUT | `/api/tasks` | `{ tasks: [{ id, intervalSec, data }] }` | 同上 |
+
+### `window.app` 桥接
+
+只用于窗口控制、应用信息等 HTTP 无法表达的能力（类型见 `src/shared/ipc.ts`）：
+
+| 方法 / 事件 | 说明 |
+|-------------|------|
+| `info()` | `{ name, version, electron, chrome, node, arch, locale, isDark, isPackaged }` |
+| `openExternal(url)` | 用系统浏览器打开，只接受 http/https |
+| `openLogs()` | 用文件管理器打开日志目录 |
+| `toggleDevTools()` | 切换 DevTools，仅开发模式生效 |
+| `window.minimize()` / `window.toggleMaximize()` / `window.close()` | 窗口控制；`close()` 进入关闭流程 |
+| `window.onCloseRequested(cb)` → 取消函数 | 注册即接管关闭，调用取消函数后不再接管 |
+| `window.closeAction('tray' \| 'quit')` | 响应关闭询问 |
+| `window.onMaximizeChanged(cb)` | 最大化状态变化 |
+| `onThemeChanged(cb)` | 系统深色模式变化，参数为 `isDark` |
+| `onAutoImport(cb)` | 定时任务到期，参数为 `{ id, data, nextRunAt }` |
+
+所有 `on*` 方法都返回取消订阅函数。
+
+**接管关闭**：
+
+```ts
+const off = window.app.window.onCloseRequested(async () => {
+  const choice = await showMyDialog(); // 'tray' | 'quit' | 'cancel'，由业务 UI 实现
+  if (choice !== 'cancel') await window.app.window.closeAction(choice); // 取消时什么都不调用
+});
+// 不再需要接管时调用 off()；页面刷新或渲染进程崩溃后接管自动失效，需要重新注册
+```
+
+**AutoImport 定时任务**：
+
+```ts
+window.app.onAutoImport(({ id, data }) => {
+  /* 执行导入 */
+});
+// 每次提交完整列表：列表外的任务删除；间隔不变只更新 data，不重新计时；intervalSec 为 ≥ 10 的整数
+await request('/tasks', { method: 'PUT', body: { tasks: [{ id: 'sync', intervalSec: 60, data: { src: 'a' } }] } });
+```
+
+任务只保存在内存中，应用重启后需要前端重新提交；页面加载期间或系统睡眠期间的 tick 不补发。
+
+### 自定义应用
+
+| 要改的 | 位置 |
+|--------|------|
+| 应用名（窗口、托盘提示、安装包、`%APPDATA%` 目录名） | `package.json` 的 `productName` |
+| 版本号（安装包文件名、`info().version`） | `package.json` 的 `version` |
+| exe 文件名 | `forge.config.ts` 的 `packagerConfig.executableName` 与 `MakerInno` 的 `exeName`（两处保持一致） |
+| 发布者 | `forge.config.ts` 中 `MakerInno` 的 `publisher` |
+| 图标 | `assets/icon.ico`（exe 与安装包）、`assets/tray.ico`（托盘） |
+| 页面标题与内容 | `index.html`、`src/renderer/` |
+
+注意：`installer/app.iss` 中的 `AppId` 决定覆盖升级的识别，**发布后永不修改**；修改 `productName` 会改变用户数据目录。
 
 ## 新增插件
 
